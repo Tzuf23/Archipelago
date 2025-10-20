@@ -4,7 +4,6 @@ import pkgutil
 from typing import Any, List
 
 from BaseClasses import CollectionState, Item, Tutorial
-from Utils import visualize_regions
 from worlds.AutoWorld import WebWorld, World
 from .Items import SohItem, item_data_table, item_table, item_name_groups, progressive_items
 from .Locations import location_table
@@ -64,10 +63,6 @@ class SohWorld(World):
         # The version is stored on Worlds, so when we're ready to bump our min AP version to 0.6.4, we can use this directly in our slot data:
         # slot_data["apworld_version"] = self.world_version
 
-    def create_item(self, name: str) -> SohItem:
-        item_entry = Items(name)
-        return SohItem(name, item_data_table[item_entry].classification, item_data_table[item_entry].item_id, self.player)
-
     def generate_early(self) -> None:
         # If door of time is set to closed and dungeon rewards aren't shuffled, force child spawn
         if self.options.door_of_time.value == 0 and self.options.shuffle_dungeon_rewards.value == 0:
@@ -88,6 +83,10 @@ class SohWorld(World):
             location.name = str(location.name)
         for region in self.get_regions():
             region.name = str(region.name)
+
+    def create_item(self, name: str) -> SohItem:
+        item_entry = Items(name)
+        return SohItem(name, item_data_table[item_entry].classification, item_data_table[item_entry].item_id, self.player)
 
     def create_items(self) -> None:
         # these are for making the progressive items collect/remove work properly
@@ -136,10 +135,10 @@ class SohWorld(World):
             # Create a filled copy of the state so the multiworld can place the dungeon rewards using logic
             prefill_state = CollectionState(self.multiworld)
             for item in self.item_pool:
-                prefill_state.collect(item, False)
+                prefill_state.collect(item, True)
             for region, shop in all_shop_locations:
                 for slot, item in shop.items():
-                    prefill_state.collect(self.create_item(item), False)
+                    prefill_state.collect(self.create_item(item), True)
             prefill_state.sweep_for_advancements()
 
             dungeon_reward_locations = [self.get_location(location.value)
@@ -154,11 +153,40 @@ class SohWorld(World):
         fill_shop_items(self)
         set_price_rules(self)
 
-    def generate_output(self, output_directory: str):
-        visualize_regions(self.multiworld.get_region(self.origin_region_name, self.player), f"SOH-Player{self.player}.puml",
-                          show_entrance_names=True,
-                          regions_to_highlight=self.multiworld.get_all_state().reachable_regions[
-            self.player])
+    def collect(self, state: CollectionState, item: Item) -> bool:
+        state._soh_stale[self.player] = True  # type: ignore
+
+        if item.name in progressive_items:
+            current_count = state.prog_items[self.player][item.name] + 1
+            current_count = increment_current_count(self, item, current_count)
+            for non_prog_version in progressive_items[item.name]:
+                state.prog_items[self.player][non_prog_version] = 1
+                current_count -= 1
+                if not current_count:
+                    break
+
+        return super().collect(state, item)
+
+    def remove(self, state: CollectionState, item: Item) -> bool:
+        changed = super().remove(state, item)
+        if changed:
+            state._soh_invalidate(self.player)  # type: ignore
+
+        if item.name in progressive_items:
+            current_count = state.prog_items[self.player][item.name]
+            current_count = increment_current_count(self, item, current_count)
+            for i, non_prog_version in enumerate(progressive_items[item.name]):
+                if i + 1 > current_count:
+                    state.prog_items[self.player][non_prog_version] = 0
+
+        return changed
+
+    # For debugging purposes
+    # def generate_output(self, output_directory: str):
+    #    from Utils import visualize_regions
+    #    visualize_regions(self.get_region(self.origin_region_name), f"SOH-Player{self.player}.puml",
+    #                      show_entrance_names=True,
+    #                      regions_to_highlight=self.multiworld.get_all_state().reachable_regions[self.player])
 
     def fill_slot_data(self) -> dict[str, Any]:
         return {
@@ -242,31 +270,3 @@ class SohWorld(World):
             "ice_trap_filler_replacement": self.options.ice_trap_filler_replacement.value,
             "apworld_version": self.apworld_version,
         }
-
-    def collect(self, state: CollectionState, item: Item) -> bool:
-        state._soh_stale[self.player] = True  # type: ignore
-
-        if item.name in progressive_items:
-            current_count = state.prog_items[self.player][item.name] + 1
-            current_count = increment_current_count(self, item, current_count)
-            for non_prog_version in progressive_items[item.name]:
-                state.prog_items[self.player][non_prog_version] = 1
-                current_count -= 1
-                if not current_count:
-                    break
-
-        return super().collect(state, item)
-
-    def remove(self, state: CollectionState, item: Item) -> bool:
-        changed = super().remove(state, item)
-        if changed:
-            state._soh_invalidate(self.player)  # type: ignore
-
-        if item.name in progressive_items:
-            current_count = state.prog_items[self.player][item.name]
-            current_count = increment_current_count(self, item, current_count)
-            for i, non_prog_version in enumerate(progressive_items[item.name]):
-                if i + 1 > current_count:
-                    state.prog_items[self.player][non_prog_version] = 0
-
-        return changed
